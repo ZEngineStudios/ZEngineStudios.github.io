@@ -1,2 +1,2 @@
-theme: jekyll-theme-minimal
+theme: minima
 # ZEngineStudios.github.io
