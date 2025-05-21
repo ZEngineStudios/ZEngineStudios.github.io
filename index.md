@@ -45,28 +45,26 @@ And it's a fully GPU-driven solution for Unity. I am developing this project alo
 
 * Support opaque object only
 
-### <font color="red">Not Support Yet:</font>
-* No software rasterier
-
-* No two phase rasterier
-
-* No Streaming
-
-* No compression
-
 * Programingable rasterier (Alpha Test)
 
 * Skinned mesh
 
-* Not Support Unity Terrain
-
-* rendering layer is not supported please turn off
+* rendering layer
 
 * Deferred shading only
 
-* May cause issues with other render features
+* Per-object GI is supported (per-object light probe， reflection probe and Lightmap)
 
-* Per-object technology is not supported (e.g., per-object light probe and reflection probe. Use per-pixel reflection probe and LPV instead, or pass per-object data yourself)
+### <font color="red">Not Support Yet:</font>
+* No software rasterier
+
+* No two phase Occlusion Culling
+
+* No Streaming
+
+* No Compression currently
+
+* Not Support Unity Terrain (no plan to support)
 
 # Document
 
@@ -74,17 +72,17 @@ And it's a fully GPU-driven solution for Unity. I am developing this project alo
 ## Setup Guide
 Using this project is very simple:
 
+### Automatically
+1、Use URP. It is recommended to start with an empty Core URP project.
+When opening for the first time or clicking [Tools/Show Seamless Virtual Geometry Setup Window], the following window will appear. Click [Init Package] to initialize."
+
+![alt text](image-4.png)
+
 ### Manually
 1、Use URP. It is recommended to start with an empty Core URP project and set the Rendering Path to Deferred (this setting is usually located in "Assets/Settings/PC_Renderer.asset").
 ![alt text](image.png)
-2、Modify the Pipeline Asset properties (usually found in "Assets/Settings/PC_RPAsset.asset"). Click the More button in the top right corner, open Advanced Properties, and disable the Rendering Layer feature.
 
-3、Open PC_Renderer.asset from step 1 and add a render feature named GPU Driven Pipeline Feature.
-![alt text](image-1.png)
-### Automatically
-Also recommended to start with an empty Core URP project. Open "Assets/GpuDrivenPipeline/Demo/Scenes/DemoScene.unity" and it will help you setup urp automatically.
-
-Then, open DemoScene to see how it works.
+2、Open PC_Renderer.asset from step 1 and add a render feature named GPU Driven Pipeline Feature. And Assgin shaders.
 
 ## How to bake Scene
 Drag Assets/GpuDrivenPipeline/Runtime/Prefabs/GPUDrivenPipelineContext.prefab into the Scene Hierarchy and configure it. The default settings should work with the default URP.
@@ -94,6 +92,11 @@ Use the configured shaders to create your scene. Then, add the GPU Driven Scene 
 If you want to continue editing the scene, click Revert Scene.
 
 ⚠️ Note: It is recommended to place all VG objects under a single root parent for better scene management and clarity.
+
+If you're using URP, the simplest way is to replace all materials' Lit shader with our GPUDrivenPipelineLit.shader, then simply click 'Bake Scene'."
+
+Alse see https://www.youtube.com/watch?v=Mvty08Og7Lo
+
 
 ![alt text](image-2.png)
 GPUDrivenPipelineContext Settings
@@ -114,8 +117,22 @@ GPUDrivenPipelineContext Settings
 
 * **Software Raster Threshold**: Current just simply drop the meshlet that smaller than the value.
 
+* **Alpha Test Info**: The actual programmable rasterization shader is determined based on the shader's name and its keyword combination.
+ If the keyword is empty, it means the shader always uses the programmable rasterization shader corresponding to that programmable raster index. 
+ TextureName refers to the texture attribute name used in the material, channel specifies which channel represents the alpha channel (0–3 corresponding to RGBA),
+  and Threshold Name indicates the attribute name that defines the cutoff threshold.
+
 ![alt text](image-3.png)
 GPU Driven Scene as shown in the image above.
+
+## Skinned Mesh Support
+For skeletal animation, we provide GPU skinning to support movement and deformation. Our solution is similar to vertex skinning. The advantage is that for multiple different animations of the same mesh, we don’t modify the original vertex buffer—instead, we skin directly based on the skeleton. This reduces unnecessary GPU memory usage. The downside is that in multi-pass scenarios (e.g., shadow and draw passes), skinning needs to be performed multiple times. This approach is a trade-off between memory consumption and runtime performance.
+
+![alt text](image-5.png)
+
+For Skinned Mesh Renderers, similar to regular renderers, no additional handling is generally required. During scene baking, a GDASkinnedMeshRendererController will be attached under the corresponding Skinned Mesh Renderer. If you need to update the position every frame, enable 'Need Update Position' — this is suitable for scenarios where frequent position updates are needed. In the case shown in the SkinnedMeshDemo scene, where multiple instances play the same animation, simply assign the 'Used Refer' to the controller that should follow the animation.
+
+Alse see https://www.youtube.com/watch?v=wklo_K_ixQI&t=2s
 
 ## Configure with your own shader
 1、Add Render State Commands, And Add Shader Properties
@@ -213,17 +230,35 @@ GPU Driven Scene as shown in the image above.
                     UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
 
                     // Recreate Data From VBuffer
+                    float2 ddxUV = 0;
+                    float2 ddyUV = 0;
+                    float2 ddxUV2 = 0;
+                    float2 ddyUV2 = 0;
+                    float2 outUV2 = 0;
+                    uint perInstanceID = 0;
+                    uint outRenderingLayer=0;
+                    InstanceGIData instanceGIData = (InstanceGIData) 0;
                     #ifdef _VBUFFER_MATERIAL_DRAW
                         int meshletIndex = 0;
                         int triangleID = 0;
-                        ReCreateVertOutDataFromVBuffer(input.uv, input.uv, input.positionWS, input.normalWS, input.positionCS.z, meshletIndex, triangleID);
+
+                        #if defined(REQUIRES_WORLD_SPACE_TANGENT_INTERPOLATOR)
+                            ReCreateVertOutDataFromVBuffer(input.uv, input.uv, input.positionWS, input.normalWS, input.tangentWS,
+                                input.positionCS.z, meshletIndex, triangleID, ddxUV, ddyUV, perInstanceID, outUV2, ddxUV2, ddyUV2, outRenderingLayer);
+                        #else
+                            float4 outTangentWS = 0;
+                            ReCreateVertOutDataFromVBuffer(input.uv, input.uv, input.positionWS, input.normalWS, outTangentWS,
+                                input.positionCS.z, meshletIndex, triangleID, ddxUV, ddyUV, perInstanceID, outUV2, ddxUV2, ddyUV2, outRenderingLayer);
+                        #endif
+                        instanceGIData = InstanceGIDataBuffer[perInstanceID];
+                        // we skip vertx shader so has to tilling here, also should scale ddx, ddy
                     #endif
                     ...
                     ...
 
                     // only if need debug Begin
                     #ifdef GPU_DRIVEN_PIPELINE_DEBUG
-                    #if defined(GPU_DRIVEN_PIPELINE)  ||  defined(_VBUFFER_MATERIAL_DRAW)
+                    #if defined(_VBUFFER_MATERIAL_DRAW)
                         uint debugIndex = 0;
                         if(_GpuDrivenPipelineDebugMode < 1.5)
                             debugIndex = meshletIndex;
@@ -235,6 +270,7 @@ GPU Driven Scene as shown in the image above.
                             float4(0, 1, 0, 1), float4(0, 0, 1, 1), float4(1, 1, 0, 1), float4(1, 0, 1, 1),
                             float4(0, 1, 1, 1), float4(1, 1, 1, 1), float4(0.5, 0.5, 0.5, 1), float4(0.5, 0, 0, 1), float4(0, 0.5, 0, 1)};
                         surfaceData.emission = debugColor[debugIndex % 10];
+                        surfaceData.albedo = 0;
                     #endif
                     #endif
                     // only if need debug End
@@ -300,70 +336,77 @@ void ReCreateVertOutDataFromVBuffer(float2 uv, out float2 outUV, out float3 outP
 }
 
 ```
-4、for shadow pass
-```hlsl
-              #include "./ShadingUtils.hlsl"
-              #pragma multi_compile _ GPU_DRIVEN_PIPELINE
-              ...
-              ...
 
-              float4 GetShadowPositionHClipGPUDriven(Attributes input)
-              {
-                  // todo
-                  // float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                  // float3 normalWS = TransformObjectToWorldNormal(input.normalOS);
-                  float3 positionWS = input.positionOS.xyz;
-                  float3 normalWS = input.normalOS;
-                  
-              #if _CASTING_PUNCTUAL_LIGHT_SHADOW
-                  float3 lightDirectionWS = normalize(_LightPosition - positionWS);
-              #else
-                  float3 lightDirectionWS = _LightDirection;
-              #endif
+4、For UV sampling, use SAMPLE_TEXTURE2D_GRAD with the ddxUV and ddyUV parameters, as demonstrated in the SampleAlbedoAlpha function. For details, refer to Assets/GpuDrivenPipeline/Runtime/Shaders/Lit/URPShaderLib/SurfaceInput.hlsl.
 
-                  float4 positionCS = TransformWorldToHClip(ApplyShadowBias(positionWS, normalWS, lightDirectionWS));
-
-              #if UNITY_REVERSED_Z
-                  positionCS.z = min(positionCS.z, UNITY_NEAR_CLIP_VALUE);
-              #else
-                  positionCS.z = max(positionCS.z, UNITY_NEAR_CLIP_VALUE);
-              #endif
-
-                  return positionCS;
-              }   
-
-              Varyings CustomShadowPassVertex(Attributes input, uint vertexID : SV_VertexID)
-              {
-                  Varyings output;
-                  UNITY_SETUP_INSTANCE_ID(input);
-                  UNITY_TRANSFER_INSTANCE_ID(input, output);
-
-                  #ifdef GPU_DRIVEN_PIPELINE
-                      uint instanceID = UNITY_GET_INSTANCE_ID(input);
-                      uint meshletIndex = 0;
-                      uint nodeOffset = 0;
-                      float3 tangentWS = 0;
-                      input.positionOS.xyz = UpdateMeshlet(instanceID, vertexID, input.normalOS, input.texcoord, meshletIndex, nodeOffset, tangentWS);
-                      output.positionCS = GetShadowPositionHClipGPUDriven(input);
-                  #else
-                      output.positionCS = GetShadowPositionHClip(input);
-                  #endif
-
-                  
-                  #if defined(_ALPHATEST_ON)
-                  output.uv = TRANSFORM_TEX(input.texcoord, _BaseMap);
-                  #endif
-                      
-                  return output;
-              }
 ```
+inline void InitializeStandardLitSurfaceData(float2 uv, out SurfaceData outSurfaceData, float2 ddxUV=0, float2 ddyUV=0)
+{
+    float2 tilling1 = _Tiling1;
+    float2 tilling2 = _Tiling2;
+    float2 uv1 = tilling1 * uv;
+    float2 uv2 = tilling2 * uv;
+    half4 albedo1 = SampleAlbedoAlpha(uv1, TEXTURE2D_ARGS(_Albedo1, sampler_Albedo1), ddxUV * tilling1, ddyUV * tilling1);
+    half4 albedo2 = SampleAlbedoAlpha(uv2, TEXTURE2D_ARGS(_Albedo1, sampler_Albedo1), ddxUV * tilling2, ddyUV * tilling2);
+    half3 normal1 = SampleNormal(uv1, TEXTURE2D_ARGS(_Normal1, sampler_Normal1), 1.0, ddxUV * tilling1, ddyUV * tilling1);
+    half3 normal2 = SampleNormal(uv2, TEXTURE2D_ARGS(_Normal1, sampler_Normal1), 1.0, ddxUV * tilling2, ddyUV * tilling2);
+    #ifdef _VBUFFER_MATERIAL_DRAW
+    half4 specular1 = SAMPLE_TEXTURE2D_GRAD(_Specular1, sampler_Specular1, uv1, ddxUV * tilling1, ddyUV * tilling1);
+    half4 specular2 = SAMPLE_TEXTURE2D_GRAD(_Specular2, sampler_Specular2, uv2, ddxUV * tilling2, ddyUV * tilling2);
+    float mask = SAMPLE_TEXTURE2D_GRAD(_Mask, sampler_Mask, uv, ddxUV, ddyUV).a;
+    #else
+    half4 specular1 = SAMPLE_TEXTURE2D(_Specular1, sampler_Specular1, uv1);
+    half4 specular2 = SAMPLE_TEXTURE2D(_Specular2, sampler_Specular2, uv2);
+    float mask = SAMPLE_TEXTURE2D(_Mask, sampler_Mask, uv).a;
+    #endif
+
+    half4 albedoAlpha = lerp(albedo1, albedo2, mask);
+    half3 normalTS = normalize(lerp(normal1, normal2, mask));
+    half4 specGloss = lerp(specular1, specular2, mask);
+    
+    
+    outSurfaceData.alpha = 1.0;
+    outSurfaceData.albedo = albedoAlpha.rgb;
+    outSurfaceData.albedo = AlphaModulate(outSurfaceData.albedo, outSurfaceData.alpha);
+
+    outSurfaceData.metallic = half(0.0);
+    outSurfaceData.specular = specGloss.rgb;
+
+    outSurfaceData.smoothness = specGloss.a;
+    outSurfaceData.normalTS = normalTS;
+    outSurfaceData.occlusion = SampleOcclusion(uv, ddxUV, ddyUV);
+    outSurfaceData.emission = 0;
+
+#if defined(_CLEARCOAT) || defined(_CLEARCOATMAP)
+    half2 clearCoat = SampleClearCoat(uv);
+    outSurfaceData.clearCoatMask       = clearCoat.r;
+    outSurfaceData.clearCoatSmoothness = clearCoat.g;
+#else
+    outSurfaceData.clearCoatMask       = half(0.0);
+    outSurfaceData.clearCoatSmoothness = half(0.0);
+#endif
+
+}
+```
+
+```
+half4 SampleAlbedoAlpha(float2 uv, TEXTURE2D_PARAM(albedoAlphaMap, sampler_albedoAlphaMap), float2 ddxUV, float2 ddyUV)
+{
+    #ifdef _VBUFFER_MATERIAL_DRAW
+    return half4(SAMPLE_TEXTURE2D_GRAD(albedoAlphaMap, sampler_albedoAlphaMap, uv, ddxUV, ddyUV));
+    #else
+    return half4(SAMPLE_TEXTURE2D(albedoAlphaMap, sampler_albedoAlphaMap, uv));
+    #endif
+}
+```
+
 
 ## GC Free
 To avoid making intrusive modifications to URP, I use reflection to call certain functions and properties during the shadow rendering phase of VG.
 
-To enable a GC-free function call approach, I use the macro GPU_DRIVEN_PIPELINE_NO_GC to differentiate between the GC-free and non-GC-free versions.
+To enable a GC-free function call approach, I use two dll to differentiate between the GC-free and non-GC-free versions.
 
-You can manually add GPU_DRIVEN_PIPELINE_NO_GC to ProjectSettings -> Player -> Scripting Define Symbols to switch to the GC-free version. Additionally, copy the URP package to your local project and modify any private or internal properties and methods causing compilation errors by changing them to public.
+Additionally, copy the URP package to your local project and modify any private or internal properties and methods causing compilation errors by changing them to public.
 
 ## Technical Details
 
@@ -385,16 +428,10 @@ The current version of BVH traversal is similar to the terrain LOD traversal use
 This may not be the most efficient approach, and the current version does not include multi-view processing (though implementing it should not be too difficult). As a result, the CPU overhead for shadows is relatively high.
 
 ### About Mobile
-I have not tested this on mobile devices. However, from a technical standpoint, since software rasterization is not used, my VG implementation should be able to run on mobile devices.
+The mobile version is now working properly (Android Vulkan), tested on OnePlus 7 Pro.
 
-That said, as everyone knows, Nanite has not been optimized for mobile either. Given the bandwidth limitations on mobile devices, the performance may not be ideal.
+That said, as everyone knows, Nanite has not been optimized for mobile either. Given the bandwidth limitations on mobile devices, the performance may not be ideal.In my tests, VG even caused a performance drop on mobile.For mobile platforms, more time may be needed for optimization.
 
-### About Programmable Rasterization
-Regarding programmable rasterization (specifically alpha testing), I don't see any major technical challenges. However, I lack suitable engineering implementations as references.
-
-I might consider implementing a simplified version of alpha testing, such as reading a texture based on UV coordinates during rasterization and applying alpha testing accordingly.
-
-In the future, I may also work on integrating GPU Skinning with meshlets.
 
 ## Contact Me
 
